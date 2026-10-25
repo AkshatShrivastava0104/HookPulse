@@ -3,6 +3,7 @@ import hashlib
 import uuid
 import time
 import os
+import secrets
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -211,5 +212,22 @@ async def health_ready():
 
 
 @app.get("/metrics", response_class=PlainTextResponse, tags=["Monitoring"])
-async def get_metrics():
+async def get_metrics(request: Request):
+    expected_token = os.getenv("METRICS_TOKEN", "")
+    supplied_token = request.headers.get("Authorization", "")
+
+    if not expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Metrics authentication is not configured",
+        )
+
+    expected_header = f"Bearer {expected_token}"
+
+    if not secrets.compare_digest(supplied_token, expected_header):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized",
+        )
+
     return metrics.generate_metrics()
