@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import hashlib
 import hmac
 import json
@@ -93,7 +93,7 @@ class DeliveryWorker:
         if attempts >= config.WORKER_MAX_RETRIES:
             self.db.update_delivery(delivery_id, status="failed", attempts=attempts, last_error=error_msg)
             metrics.inc_worker_job("failed")
-            logger.error("Webhook delivery exhausted retries (moved to DLQ)", extra={
+            logger.error(f"Webhook delivery exhausted retries (moved to DLQ): {error_msg}", extra={
                 "delivery_id": delivery_id,
                 "attempts": attempts,
                 "error": error_msg
@@ -105,7 +105,7 @@ class DeliveryWorker:
             self.db.update_delivery(delivery_id, status="retry", attempts=attempts,
                                    last_error=error_msg, next_retry_at=next_retry_at)
             metrics.inc_worker_job("retry")
-            logger.warning("Webhook delivery scheduled for retry", extra={
+            logger.warning(f"Webhook delivery scheduled for retry: {error_msg}", extra={
                 "delivery_id": delivery_id,
                 "attempts": attempts,
                 "next_retry_at": next_retry_at,
@@ -136,3 +136,4 @@ class DeliveryWorker:
 
     def get_stats(self) -> Dict[str, Any]:
         return self.db.get_delivery_stats()
+
