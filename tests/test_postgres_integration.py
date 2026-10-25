@@ -104,3 +104,51 @@ def test_postgres_concurrent_duplicate_inserts(pg_storage):
                     (message_id,),
                 )
             conn.commit()
+
+
+def test_postgres_insert_message_with_delivery(pg_storage):
+    message_id = f"pytest-atomic-{uuid.uuid4()}"
+    delivery_id = f"deliv-{uuid.uuid4()}"
+    target_url = "https://example.com/webhook-sink"
+
+    try:
+        inserted = pg_storage.insert_message_with_delivery(
+            message_id,
+            "+919876543210",
+            "+14155550100",
+            "2025-01-15T10:00:00Z",
+            "Atomic delivery integration test",
+            delivery_id=delivery_id,
+            target_url=target_url,
+        )
+        assert inserted is True
+
+        # Duplicate message with delivery should return False (idempotent)
+        duplicate = pg_storage.insert_message_with_delivery(
+            message_id,
+            "+919876543210",
+            "+14155550100",
+            "2025-01-15T10:00:00Z",
+            "Atomic delivery integration test",
+            delivery_id=f"deliv-dup-{uuid.uuid4()}",
+            target_url=target_url,
+        )
+        assert duplicate is False
+
+        # Verify delivery record was created
+        with pg_storage.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status, attempts, target_url FROM deliveries WHERE id = %s", (delivery_id,))
+                delivery = cur.fetchone()
+
+        assert delivery is not None
+        assert delivery["status"] == "pending"
+        assert delivery["attempts"] == 0
+        assert delivery["target_url"] == target_url
+
+    finally:
+        with pg_storage.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM messages WHERE message_id = %s", (message_id,))
+            conn.commit()
+

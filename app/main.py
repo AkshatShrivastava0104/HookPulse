@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import hashlib
 import uuid
@@ -99,11 +100,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.middleware("http")
 async def logging_and_metrics_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())
-    start_time = time.time()
+    start_time = time.perf_counter()
 
     response = await call_next(request)
 
-    latency_ms = (time.time() - start_time) * 1000
+    latency_ms = (time.perf_counter() - start_time) * 1000
+
+    response.headers["X-Response-Time-Ms"] = f"{latency_ms:.2f}"
+    response.headers["Server-Timing"] = f"total;dur={latency_ms:.2f}"
 
     log_extra = {
         "request_id": request_id,
@@ -146,20 +150,29 @@ async def webhook(
 ):
     request.state.message_id = payload.message_id
 
-    inserted = db.insert_message(
+    should_forward = bool(config.ENABLE_ASYNC_WORKER and config.WEBHOOK_FORWARD_URL)
+    delivery_id = str(uuid.uuid4()) if should_forward else None
+    target_url = config.WEBHOOK_FORWARD_URL if should_forward else None
+
+    # Offload blocking database I/O to worker thread to prevent event loop starvation under concurrency
+    inserted = await asyncio.to_thread(
+        db.insert_message_with_delivery,
         payload.message_id,
         payload.from_,
         payload.to,
         payload.ts,
-        payload.text
+        payload.text,
+        delivery_id=delivery_id,
+        target_url=target_url,
     )
 
     if inserted:
         request.state.dup = False
         request.state.result = "created"
         metrics.inc_webhook_request("created")
-        if config.ENABLE_ASYNC_WORKER and config.WEBHOOK_FORWARD_URL:
-            worker.enqueue_for_forwarding(payload.message_id)
+        if should_forward:
+            metrics.inc_worker_job("enqueued")
+            logger.info("Enqueued webhook delivery", extra={"delivery_id": delivery_id, "message_id": payload.message_id})
     else:
         request.state.dup = True
         request.state.result = "duplicate"
@@ -176,12 +189,12 @@ async def get_messages(
     since: Optional[str] = Query(None, description="Filter messages on or after this ISO-8601 timestamp"),
     q: Optional[str] = Query(None, description="Case-insensitive text substring query"),
 ):
-    return db.get_messages(limit, offset, from_, since, q)
+    return await asyncio.to_thread(db.get_messages, limit, offset, from_, since, q)
 
 
 @app.get("/stats", response_model=StatsResponse, tags=["Analytics"])
 async def get_stats():
-    return db.get_stats()
+    return await asyncio.to_thread(db.get_stats)
 
 
 @app.get("/worker/stats", tags=["Worker"])
@@ -206,7 +219,8 @@ async def health_live():
 async def health_ready():
     if not config.validate():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="WEBHOOK_SECRET not configured")
-    if not db.is_healthy():
+    is_healthy = await asyncio.to_thread(db.is_healthy)
+    if not is_healthy:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database not healthy")
     return {"status": "ready"}
 

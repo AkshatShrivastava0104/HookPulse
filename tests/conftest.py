@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 os.environ["WEBHOOK_SECRET"] = "testsecret"
 os.environ["DATABASE_URL"] = "sqlite:////tmp/test_app.db"
+os.environ["METRICS_TOKEN"] = "test-metrics-token"
 
 from app.main import app, db
 

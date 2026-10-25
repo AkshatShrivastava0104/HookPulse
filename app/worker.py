@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import hashlib
 import hmac
 import json
@@ -76,7 +76,7 @@ class DeliveryWorker:
         try:
             response = await client.post(target_url, content=body_bytes, headers=headers, timeout=5.0)
             if response.status_code in (200, 201, 202, 204):
-                self.db.update_delivery(delivery_id, status="delivered", attempts=attempts)
+                await asyncio.to_thread(self.db.update_delivery, delivery_id, status="delivered", attempts=attempts)
                 metrics.inc_worker_job("delivered")
                 logger.info("Webhook delivery succeeded", extra={
                     "delivery_id": delivery_id,
@@ -91,7 +91,7 @@ class DeliveryWorker:
 
         # If failed, check retries
         if attempts >= config.WORKER_MAX_RETRIES:
-            self.db.update_delivery(delivery_id, status="failed", attempts=attempts, last_error=error_msg)
+            await asyncio.to_thread(self.db.update_delivery, delivery_id, status="failed", attempts=attempts, last_error=error_msg)
             metrics.inc_worker_job("failed")
             logger.error(f"Webhook delivery exhausted retries (moved to DLQ): {error_msg}", extra={
                 "delivery_id": delivery_id,
@@ -102,7 +102,7 @@ class DeliveryWorker:
             delay_seconds = (config.WORKER_BACKOFF_FACTOR ** attempts) + random.uniform(0.1, 0.5)
             next_retry_dt = datetime.utcnow() + timedelta(seconds=delay_seconds)
             next_retry_at = next_retry_dt.isoformat() + 'Z'
-            self.db.update_delivery(delivery_id, status="retry", attempts=attempts,
+            await asyncio.to_thread(self.db.update_delivery, delivery_id, status="retry", attempts=attempts,
                                    last_error=error_msg, next_retry_at=next_retry_at)
             metrics.inc_worker_job("retry")
             logger.warning(f"Webhook delivery scheduled for retry: {error_msg}", extra={
@@ -116,7 +116,7 @@ class DeliveryWorker:
         async with httpx.AsyncClient() as client:
             while self.is_running:
                 try:
-                    pending = self.db.fetch_pending_deliveries(limit=10)
+                    pending = await asyncio.to_thread(self.db.fetch_pending_deliveries, limit=10)
                     if pending:
                         for item in pending:
                             if not self.is_running:

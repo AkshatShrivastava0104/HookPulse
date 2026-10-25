@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
+E164_REGEX = re.compile(r'^\+[1-9]\d{1,14}$')
+ 
 class WebhookMessage(BaseModel):
     message_id: str = Field(..., min_length=1)
     from_: str = Field(..., alias="from")
@@ -13,7 +15,7 @@ class WebhookMessage(BaseModel):
     @field_validator('from_', 'to')
     @classmethod
     def validate_phone(cls, v: str) -> str:
-        if not re.match(r'^\+[1-9]\d{1,14}$', v):
+        if not E164_REGEX.match(v):
             raise ValueError('Must be valid phone number in E.164 format (+ followed by country code and digits)')
         return v
 

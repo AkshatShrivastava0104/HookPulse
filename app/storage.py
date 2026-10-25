@@ -27,6 +27,13 @@ class BaseStorage(ABC):
         pass
 
     @abstractmethod
+    def insert_message_with_delivery(self, message_id: str, from_msisdn: str, to_msisdn: str,
+                                    ts: str, text: Optional[str],
+                                    delivery_id: Optional[str] = None,
+                                    target_url: Optional[str] = None) -> bool:
+        pass
+
+    @abstractmethod
     def get_messages(self, limit: int = 50, offset: int = 0, from_filter: Optional[str] = None,
                      since: Optional[str] = None, q: Optional[str] = None) -> Dict[str, Any]:
         pass
@@ -140,8 +147,10 @@ class SQLiteStorage(BaseStorage):
             """)
             conn.commit()
 
-    def insert_message(self, message_id: str, from_msisdn: str, to_msisdn: str,
-                       ts: str, text: Optional[str]) -> bool:
+    def insert_message_with_delivery(self, message_id: str, from_msisdn: str, to_msisdn: str,
+                                    ts: str, text: Optional[str],
+                                    delivery_id: Optional[str] = None,
+                                    target_url: Optional[str] = None) -> bool:
         try:
             with self.get_connection() as conn:
                 created_at = datetime.utcnow().isoformat() + 'Z'
@@ -149,10 +158,19 @@ class SQLiteStorage(BaseStorage):
                     INSERT INTO messages (message_id, from_msisdn, to_msisdn, ts, text, created_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (message_id, from_msisdn, to_msisdn, ts, text, created_at))
+                if delivery_id and target_url:
+                    conn.execute("""
+                        INSERT INTO deliveries (id, message_id, target_url, status, attempts, created_at, updated_at)
+                        VALUES (?, ?, ?, 'pending', 0, ?, ?)
+                    """, (delivery_id, message_id, target_url, created_at, created_at))
                 conn.commit()
                 return True
         except sqlite3.IntegrityError:
             return False
+
+    def insert_message(self, message_id: str, from_msisdn: str, to_msisdn: str,
+                       ts: str, text: Optional[str]) -> bool:
+        return self.insert_message_with_delivery(message_id, from_msisdn, to_msisdn, ts, text)
 
     def get_messages(self, limit: int = 50, offset: int = 0, from_filter: Optional[str] = None,
                      since: Optional[str] = None, q: Optional[str] = None) -> Dict[str, Any]:
@@ -300,15 +318,21 @@ class SQLiteStorage(BaseStorage):
 
 
 class PostgresStorage(BaseStorage):
-    def __init__(self, db_url: str, min_size: int = 2, max_size: int = 20):
+    def __init__(self, db_url: str, min_size: Optional[int] = None, max_size: Optional[int] = None, timeout: Optional[float] = None):
         if not HAS_POSTGRES:
             raise RuntimeError("psycopg and psycopg_pool must be installed to use PostgresStorage")
         
+        from app.config import config
+        pool_min = min_size if min_size is not None else config.DB_POOL_MIN_SIZE
+        pool_max = max_size if max_size is not None else config.DB_POOL_MAX_SIZE
+        pool_timeout = timeout if timeout is not None else config.DB_POOL_TIMEOUT
+
         self.db_url = db_url
         self.pool = ConnectionPool(
             conninfo=self.db_url,
-            min_size=min_size,
-            max_size=max_size,
+            min_size=pool_min,
+            max_size=pool_max,
+            timeout=pool_timeout,
             open=True,
             kwargs={"row_factory": dict_row}
         )
@@ -336,9 +360,6 @@ class PostgresStorage(BaseStorage):
                     CREATE INDEX IF NOT EXISTS idx_from_msisdn ON messages(from_msisdn)
                 """)
                 cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_ts ON messages(ts)
-                """)
-                cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_ts_message_id ON messages(ts ASC, message_id ASC)
                 """)
                 cur.execute("""
@@ -355,12 +376,17 @@ class PostgresStorage(BaseStorage):
                     )
                 """)
                 cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, next_retry_at)
+                    CREATE INDEX IF NOT EXISTS idx_deliveries_message_id ON deliveries(message_id)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, next_retry_at, created_at)
                 """)
             conn.commit()
 
-    def insert_message(self, message_id: str, from_msisdn: str, to_msisdn: str,
-                       ts: str, text: Optional[str]) -> bool:
+    def insert_message_with_delivery(self, message_id: str, from_msisdn: str, to_msisdn: str,
+                                    ts: str, text: Optional[str],
+                                    delivery_id: Optional[str] = None,
+                                    target_url: Optional[str] = None) -> bool:
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -372,10 +398,19 @@ class PostgresStorage(BaseStorage):
                         RETURNING message_id
                     """, (message_id, from_msisdn, to_msisdn, ts, text, created_at))
                     row = cur.fetchone()
+                    if row is not None and delivery_id and target_url:
+                        cur.execute("""
+                            INSERT INTO deliveries (id, message_id, target_url, status, attempts, created_at, updated_at)
+                            VALUES (%s, %s, %s, 'pending', 0, %s, %s)
+                        """, (delivery_id, message_id, target_url, created_at, created_at))
                 conn.commit()
                 return row is not None
         except Exception:
             return False
+
+    def insert_message(self, message_id: str, from_msisdn: str, to_msisdn: str,
+                       ts: str, text: Optional[str]) -> bool:
+        return self.insert_message_with_delivery(message_id, from_msisdn, to_msisdn, ts, text)
 
     def get_messages(self, limit: int = 50, offset: int = 0, from_filter: Optional[str] = None,
                      since: Optional[str] = None, q: Optional[str] = None) -> Dict[str, Any]:
@@ -564,6 +599,14 @@ class Database:
     def insert_message(self, message_id: str, from_msisdn: str, to_msisdn: str,
                        ts: str, text: Optional[str]) -> bool:
         return self._backend.insert_message(message_id, from_msisdn, to_msisdn, ts, text)
+
+    def insert_message_with_delivery(self, message_id: str, from_msisdn: str, to_msisdn: str,
+                                    ts: str, text: Optional[str],
+                                    delivery_id: Optional[str] = None,
+                                    target_url: Optional[str] = None) -> bool:
+        return self._backend.insert_message_with_delivery(
+            message_id, from_msisdn, to_msisdn, ts, text, delivery_id, target_url
+        )
 
     def get_messages(self, limit: int = 50, offset: int = 0, from_filter: Optional[str] = None,
                      since: Optional[str] = None, q: Optional[str] = None) -> Dict[str, Any]:
